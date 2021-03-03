@@ -42,7 +42,7 @@ services:
     volumes:
       - "postgres-volume:/var/lib/postgresql/data"
     ports:
-      - "5433:5433"
+      - "5432:5433"
     environment:
       POSTGRES_PASSWORD: jetlinks
       POSTGRES_DB: jetlinks
