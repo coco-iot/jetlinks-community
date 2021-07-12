@@ -2,18 +2,23 @@ package org.jetlinks.community.device.service;
 
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.MapUtils;
 import org.hswebframework.ezorm.rdb.mapping.ReactiveRepository;
+import org.jetlinks.community.device.entity.DeviceInstanceEntity;
+import org.jetlinks.community.device.entity.DeviceTagEntity;
+import org.jetlinks.community.device.enums.DeviceFeature;
+import org.jetlinks.community.device.enums.DeviceState;
+import org.jetlinks.community.gateway.annotation.Subscribe;
 import org.jetlinks.core.device.DeviceConfigKey;
 import org.jetlinks.core.device.DeviceOperator;
 import org.jetlinks.core.device.DeviceRegistry;
 import org.jetlinks.core.event.EventBus;
 import org.jetlinks.core.event.Subscription;
 import org.jetlinks.core.message.*;
+import org.jetlinks.core.metadata.DeviceMetadata;
 import org.jetlinks.core.utils.FluxUtils;
-import org.jetlinks.community.device.entity.DeviceInstanceEntity;
-import org.jetlinks.community.device.entity.DeviceTagEntity;
-import org.jetlinks.community.device.enums.DeviceState;
-import org.jetlinks.community.gateway.annotation.Subscribe;
+import org.jetlinks.reactor.ql.utils.CastUtils;
+import org.jetlinks.supports.official.JetLinksDeviceMetadataCodec;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -70,12 +75,24 @@ public class DeviceMessageBusinessHandler {
                 instance.setCreateTimeNow();
                 instance.setCreatorId(tps.getT4().getCreatorId());
                 instance.setOrgId(tps.getT4().getOrgId());
-                instance.setState(DeviceState.online);
+                @SuppressWarnings("all")
+                boolean selfManageState = CastUtils
+                    .castBoolean(tps.getT5().getOrDefault(DeviceConfigKey.selfManageState.getKey(), false));
+
+                if (selfManageState) {
+                    instance.addFeature(DeviceFeature.selfManageState);
+                }
+
+                instance.setState(selfManageState ? DeviceState.offline : DeviceState.online);
+
                 return deviceService
                     .save(Mono.just(instance))
                     .thenReturn(instance)
                     .flatMap(device -> registry
-                        .register(device.toDeviceInfo().addConfig("state", DeviceState.online)));
+                        .register(device.toDeviceInfo()
+                                        .addConfig("state", selfManageState
+                                            ? org.jetlinks.core.device.DeviceState.offline
+                                            : org.jetlinks.core.device.DeviceState.online)));
             });
     }
 
@@ -84,6 +101,16 @@ public class DeviceMessageBusinessHandler {
     public Mono<Void> autoRegisterDevice(DeviceRegisterMessage message) {
         return registry
             .getDevice(message.getDeviceId())
+            .flatMap(device -> {
+                @SuppressWarnings("all")
+                Map<String, Object> config = message.getHeader("configuration").map(Map.class::cast).orElse(null);
+                if (MapUtils.isNotEmpty(config)) {
+                    return device
+                        .setConfigs(config)
+                        .thenReturn(device);
+                }
+                return Mono.just(device);
+            })
             .switchIfEmpty(Mono.defer(() -> {
                 //自动注册
                 return doAutoRegister(message);
@@ -150,6 +177,15 @@ public class DeviceMessageBusinessHandler {
         return Mono.empty();
     }
 
+    @Subscribe("/device/*/*/unregister")
+    @Transactional(propagation = Propagation.NEVER)
+    public Mono<Void> unRegisterDevice(DeviceUnRegisterMessage message) {
+        //注销设备
+        return deviceService
+            .unregisterDevice(message.getDeviceId())
+            .then();
+    }
+
     @Subscribe("/device/*/*/message/tags/update")
     public Mono<Void> updateDeviceTag(UpdateTagMessage message) {
         Map<String, Object> tags = message.getTags();
@@ -179,6 +215,41 @@ public class DeviceMessageBusinessHandler {
                     return tagEntity;
                 }))
             .as(tagRepository::save)
+            .then();
+    }
+
+    @Subscribe("/device/*/*/metadata/derived")
+    public Mono<Void> updateMetadata(DerivedMetadataMessage message) {
+        if (message.isAll()) {
+            return updateMedata(message.getDeviceId(), message.getMetadata());
+        }
+        return Mono
+            .zip(
+                //原始物模型
+                registry
+                    .getDevice(message.getDeviceId())
+                    .flatMap(DeviceOperator::getMetadata),
+                //新的物模型
+                JetLinksDeviceMetadataCodec
+                    .getInstance()
+                    .decode(message.getMetadata()),
+                //合并在一起
+                DeviceMetadata::merge
+            )
+            //重新编码为字符串
+            .flatMap(JetLinksDeviceMetadataCodec.getInstance()::encode)
+            //更新物模型
+            .flatMap(metadata -> updateMedata(message.getDeviceId(), metadata));
+    }
+
+    private Mono<Void> updateMedata(String deviceId, String metadata) {
+        return deviceService
+            .createUpdate()
+            .set(DeviceInstanceEntity::getDeriveMetadata, metadata)
+            .where(DeviceInstanceEntity::getId, deviceId)
+            .execute()
+            .then(registry.getDevice(deviceId))
+            .flatMap(device -> device.updateMetadata(metadata))
             .then();
     }
 
