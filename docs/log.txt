@@ -1,0 +1,2 @@
+psql
+psql: FATAL:  role "root" does not exist

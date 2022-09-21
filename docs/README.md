@@ -10,4 +10,6 @@ admin
 http://localhost:8000/jetlinks/authorize/login
 http://82.157.54.206:8848/jetlinks/authorize/login
 http://82.157.54.206:9000/jetlinks/authorize/login
+
+sudo docker exec -it jetlinks-ce-postgres bash
 ```
