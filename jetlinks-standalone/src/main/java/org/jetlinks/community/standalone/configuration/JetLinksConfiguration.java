@@ -2,7 +2,6 @@ package org.jetlinks.community.standalone.configuration;
 
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.guava.CaffeinatedGuava;
-import io.micrometer.core.instrument.MeterRegistry;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
 import lombok.extern.slf4j.Slf4j;
@@ -12,6 +11,8 @@ import org.hswebframework.web.authorization.token.redis.RedisUserTokenManager;
 import org.jetlinks.community.device.entity.DeviceInstanceEntity;
 import org.jetlinks.community.device.entity.DeviceProductEntity;
 import org.jetlinks.community.device.service.AutoDiscoverDeviceRegistry;
+import org.jetlinks.community.device.timeseries.DeviceTimeSeriesMetric;
+import org.jetlinks.community.micrometer.MeterRegistryManager;
 import org.jetlinks.core.ProtocolSupports;
 import org.jetlinks.core.cluster.ClusterManager;
 import org.jetlinks.core.config.ConfigStorageManager;
@@ -26,6 +27,7 @@ import org.jetlinks.core.server.monitor.GatewayServerMonitor;
 import org.jetlinks.core.server.session.DeviceSessionManager;
 import org.jetlinks.core.spi.ServiceContext;
 import org.jetlinks.supports.cluster.ClusterDeviceRegistry;
+import org.jetlinks.supports.cluster.EventBusDeviceOperationBroker;
 import org.jetlinks.supports.cluster.redis.RedisClusterManager;
 import org.jetlinks.supports.config.EventBusStorageManager;
 import org.jetlinks.supports.event.BrokerEventBus;
@@ -82,9 +84,9 @@ public class JetLinksConfiguration {
         return new BrokerEventBus();
     }
 
-    @Bean
-    public StandaloneDeviceMessageBroker standaloneDeviceMessageBroker() {
-        return new StandaloneDeviceMessageBroker();
+    @Bean(initMethod = "start", destroyMethod = "dispose")
+    public EventBusDeviceOperationBroker eventBusDeviceOperationBroker(ClusterManager clusterManager,EventBus eventBus) {
+        return new EventBusDeviceOperationBroker(clusterManager.getCurrentServerId(),eventBus);
     }
 
     @Bean
@@ -145,8 +147,10 @@ public class JetLinksConfiguration {
     }
 
     @Bean
-    public GatewayServerMonitor gatewayServerMonitor(JetLinksProperties properties, MeterRegistry registry) {
-        GatewayServerMetrics metrics = new MicrometerGatewayServerMetrics(properties.getServerId(), registry);
+    public GatewayServerMonitor gatewayServerMonitor(JetLinksProperties properties, MeterRegistryManager registry) {
+        GatewayServerMetrics metrics = new MicrometerGatewayServerMetrics(properties.getServerId(),
+                                                                          registry.getMeterRegister(DeviceTimeSeriesMetric
+                                                                                                        .deviceMetrics().getId()));
 
         return new GatewayServerMonitor() {
             @Override

@@ -28,7 +28,6 @@ import reactor.core.publisher.Mono;
 
 import javax.annotation.Nonnull;
 import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.function.Consumer;
@@ -214,11 +213,15 @@ class VertxMqttConnection implements MqttConnection {
 
     @Override
     public InetSocketAddress getClientAddress() {
-        if (clientAddress == null) {
-            SocketAddress address = endpoint.remoteAddress();
-            if (address != null) {
-                clientAddress = new InetSocketAddress(address.host(), address.port());
+        try {
+            if (clientAddress == null && endpoint != null) {
+                SocketAddress address = endpoint.remoteAddress();
+                if (address != null) {
+                    clientAddress = new InetSocketAddress(address.host(), address.port());
+                }
             }
+        }catch (Throwable ignore){
+
         }
         return clientAddress;
     }

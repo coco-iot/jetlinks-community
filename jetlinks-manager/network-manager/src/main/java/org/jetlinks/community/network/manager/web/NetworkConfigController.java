@@ -8,14 +8,17 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.Setter;
 import org.hswebframework.ezorm.rdb.operator.dml.query.SortOrder;
-import org.hswebframework.web.authorization.annotation.*;
+import org.hswebframework.web.authorization.annotation.Authorize;
+import org.hswebframework.web.authorization.annotation.QueryAction;
+import org.hswebframework.web.authorization.annotation.Resource;
+import org.hswebframework.web.authorization.annotation.SaveAction;
 import org.hswebframework.web.crud.web.reactive.ReactiveServiceCrudController;
 import org.hswebframework.web.exception.NotFoundException;
 import org.jetlinks.community.network.DefaultNetworkType;
-import org.jetlinks.community.network.NetworkProvider;
-import org.jetlinks.community.network.manager.enums.NetworkConfigState;
 import org.jetlinks.community.network.NetworkManager;
+import org.jetlinks.community.network.NetworkProvider;
 import org.jetlinks.community.network.manager.entity.NetworkConfigEntity;
+import org.jetlinks.community.network.manager.enums.NetworkConfigState;
 import org.jetlinks.community.network.manager.service.NetworkConfigService;
 import org.jetlinks.community.network.manager.web.response.NetworkTypeInfo;
 import org.springframework.util.StringUtils;
@@ -116,7 +119,7 @@ public class NetworkConfigController implements ReactiveServiceCrudController<Ne
                 .where(conf::getId)
                 .execute()
                 .thenReturn(conf))
-            .flatMap(conf -> networkManager.reload(conf.getType(), id));
+            .flatMap(conf -> networkManager.reload(conf.lookupNetworkType(), id));
     }
 
     @PostMapping("/{id}/_shutdown")
@@ -131,7 +134,7 @@ public class NetworkConfigController implements ReactiveServiceCrudController<Ne
                 .where(conf::getId)
                 .execute()
                 .thenReturn(conf))
-            .flatMap(conf -> networkManager.shutdown(conf.getType(), id));
+            .flatMap(conf -> networkManager.shutdown(conf.lookupNetworkType(), id));
     }
 
 }

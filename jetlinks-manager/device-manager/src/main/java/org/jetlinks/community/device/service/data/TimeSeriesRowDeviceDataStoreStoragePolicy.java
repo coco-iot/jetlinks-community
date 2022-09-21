@@ -2,18 +2,18 @@ package org.jetlinks.community.device.service.data;
 
 import org.hswebframework.web.api.crud.entity.PagerResult;
 import org.hswebframework.web.api.crud.entity.QueryParamEntity;
-import org.jetlinks.core.device.DeviceOperator;
-import org.jetlinks.core.device.DeviceRegistry;
-import org.jetlinks.core.message.DeviceMessage;
-import org.jetlinks.core.metadata.ConfigMetadata;
-import org.jetlinks.core.metadata.DeviceMetadata;
-import org.jetlinks.core.metadata.PropertyMetadata;
 import org.jetlinks.community.device.entity.DeviceProperty;
 import org.jetlinks.community.device.timeseries.DeviceTimeSeriesMetadata;
 import org.jetlinks.community.device.timeseries.DeviceTimeSeriesMetric;
 import org.jetlinks.community.timeseries.TimeSeriesData;
 import org.jetlinks.community.timeseries.TimeSeriesManager;
 import org.jetlinks.community.timeseries.query.*;
+import org.jetlinks.core.device.DeviceOperator;
+import org.jetlinks.core.device.DeviceRegistry;
+import org.jetlinks.core.message.DeviceMessage;
+import org.jetlinks.core.metadata.ConfigMetadata;
+import org.jetlinks.core.metadata.DeviceMetadata;
+import org.jetlinks.core.metadata.PropertyMetadata;
 import org.jetlinks.reactor.ql.utils.CastUtils;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
@@ -28,6 +28,11 @@ import java.util.stream.Stream;
 
 import static org.jetlinks.community.device.timeseries.DeviceTimeSeriesMetric.devicePropertyMetric;
 
+/**
+ * 设备时序数据行存储策略
+ *
+ * @author zhouhao
+ */
 @Component
 public class TimeSeriesRowDeviceDataStoreStoragePolicy extends TimeSeriesDeviceDataStoragePolicy implements DeviceDataStoragePolicy {
 
@@ -169,33 +174,30 @@ public class TimeSeriesRowDeviceDataStoreStoragePolicy extends TimeSeriesDeviceD
     @Nonnull
     @Override
     public Flux<DeviceProperty> queryEachProperties(@Nonnull String deviceId,
-                                                    @Nonnull QueryParamEntity query) {
+                                                    @Nonnull QueryParamEntity query,
+                                                    @Nonnull String... property) {
 
-        return deviceRegistry
-            .getDevice(deviceId)
-            .flatMapMany(device -> Mono
-                .zip(device.getProduct(), device.getMetadata())
-                .flatMapMany(tp2 -> {
+        return getProductAndMetadataByDevice(deviceId)
+            .flatMapMany(tp2 -> {
 
-                    Map<String, PropertyMetadata> propertiesMap = tp2.getT2()
-                        .getProperties()
-                        .stream()
-                        .collect(Collectors.toMap(PropertyMetadata::getId, Function.identity(), (a, b) -> a));
-                    if (propertiesMap.isEmpty()) {
-                        return Flux.empty();
-                    }
-                    return timeSeriesManager
-                        .getService(devicePropertyMetric(tp2.getT1().getId()))
-                        .aggregation(AggregationQueryParam
-                            .of()
-                            .agg(new LimitAggregationColumn("property", "property", Aggregation.TOP, query.getPageSize()))
-                            .groupBy(new LimitGroup("property", "property", propertiesMap.size() * 2)) //按property分组
-                            .filter(query)
-                            .filter(q -> q.where("deviceId", deviceId))
-                        ).map(data -> DeviceProperty
-                            .of(data, data.getString("property").map(propertiesMap::get).orElse(null))
-                            .deviceId(deviceId));
-                }));
+                Map<String, PropertyMetadata> propertiesMap = getPropertyMetadata(tp2.getT2(), property)
+                    .stream()
+                    .collect(Collectors.toMap(PropertyMetadata::getId, Function.identity(), (a, b) -> a));
+                if (propertiesMap.isEmpty()) {
+                    return Flux.empty();
+                }
+                return timeSeriesManager
+                    .getService(devicePropertyMetric(tp2.getT1().getId()))
+                    .aggregation(AggregationQueryParam
+                        .of()
+                        .agg(new LimitAggregationColumn("property", "property", Aggregation.TOP, query.getPageSize()))
+                        .groupBy(new LimitGroup("property", "property", propertiesMap.size() * 2)) //按property分组
+                        .filter(query)
+                        .filter(q -> q.where("deviceId", deviceId).in("property", propertiesMap.keySet()))
+                    ).map(data -> DeviceProperty
+                        .of(data, data.getString("property").map(propertiesMap::get).orElse(null))
+                        .deviceId(deviceId));
+            });
     }
 
     protected String getTimeSeriesMetric(String productId) {
@@ -221,47 +223,92 @@ public class TimeSeriesRowDeviceDataStoreStoragePolicy extends TimeSeriesDeviceD
         }
 
         Map<String, String> propertyAlias = Arrays.stream(properties)
-            .collect(Collectors.toMap(DeviceDataService.DevicePropertyAggregation::getAlias, DeviceDataService.DevicePropertyAggregation::getProperty));
+            .collect(Collectors.toMap(DeviceDataService.DevicePropertyAggregation::getAlias,
+                                      DeviceDataService.DevicePropertyAggregation::getProperty));
 
-        return AggregationQueryParam.of()
+        Map<String, DeviceDataService.DevicePropertyAggregation> aliasProperty = Arrays
+            .stream(properties)
+            .collect(Collectors.toMap(DeviceDataService.DevicePropertyAggregation::getAlias,
+                                      Function.identity()));
+
+        return AggregationQueryParam
+            .of()
             .as(param -> {
                 Arrays.stream(properties)
-                    .forEach(agg -> param.agg("numberValue", "value_" + agg.getAlias(), agg.getAgg()));
+                      .forEach(agg -> param.agg("numberValue", "value_" + agg.getAlias(), agg.getAgg()));
                 return param;
             })
-            .groupBy((Group) new TimeGroup(request.interval, "time", request.format))
+            .as(param -> {
+                if (request.interval == null) {
+                    return param;
+                }
+                return param.groupBy((Group) new TimeGroup(request.interval, "time", request.format));
+            })
             .groupBy(new LimitGroup("property", "property", properties.length))
             .limit(request.limit * properties.length)
             .from(request.from)
             .to(request.to)
             .filter(request.filter)
-            .filter(query -> query.where().in("property", propertyAlias.values()))
+            .filter(query -> query
+                .where()
+                .in("property", new HashSet<>(propertyAlias.values())))
             //执行查询
             .execute(timeSeriesManager.getService(getTimeSeriesMetric(productId))::aggregation)
             //按时间分组,然后将返回的结果合并起来
-            .groupBy(agg -> agg.getString("time", ""),Integer.MAX_VALUE)
-            .flatMap(group ->
-                {
-                    String time = group.key();
-                    return group
-                        //按属性分组
-                        .groupBy(agg -> agg.getString("property", ""),Integer.MAX_VALUE)
-                        .flatMap(propsGroup -> {
-                            String property = propsGroup.key();
-                            return propsGroup
-                                .<Map<String, Object>>reduceWith(HashMap::new, (a, b) -> {
-                                    a.putIfAbsent("time", time);
-                                    a.putIfAbsent("_time", b.get("_time").orElseGet(Date::new));
-                                    b.get("value_" + property).ifPresent(v -> a.put(property, v));
-                                    return a;
-                                });
-                        })
-                        .<Map<String, Object>>reduceWith(HashMap::new, (a, b) -> {
-                            a.putAll(b);
-                            return a;
-                        });
+            .groupBy(agg -> agg.getString("time", ""), Integer.MAX_VALUE)
+            .as(flux -> {
+                //按时间分组
+                if (request.getInterval() != null) {
+                    return flux
+                        .flatMap(group -> {
+                                     String time = group.key();
+                                     return group
+                                         //按属性分组
+                                         .groupBy(agg -> agg.getString("property", ""), Integer.MAX_VALUE)
+                                         .flatMap(propsGroup -> {
+                                             String property = String.valueOf(propsGroup.key());
+                                             return propsGroup
+                                                 .reduce(AggregationData::merge)
+                                                 .map(agg -> {
+                                                     Map<String, Object> data = new HashMap<>();
+                                                     data.put("_time", agg.get("_time").orElse(time));
+                                                     data.put("time", time);
+                                                     aliasProperty.forEach((alias, prp) -> {
+                                                         if (prp.getAgg() == Aggregation.FIRST || prp.getAgg() == Aggregation.TOP) {
+                                                             data.putIfAbsent(alias, agg
+                                                                 .get("numberValue")
+                                                                 .orElse(agg.get("value").orElse(null)));
+                                                         } else if (property.equals(prp.getProperty())) {
+                                                             data.putIfAbsent(alias, agg
+                                                                 .get("value_" + alias)
+                                                                 .orElse(0));
+                                                         }
+                                                     });
+                                                     return data;
+                                                 });
+                                         })
+                                         .<Map<String, Object>>reduceWith(HashMap::new, (a, b) -> {
+                                             a.putAll(b);
+                                             return a;
+                                         });
+                                 }
+                        );
+                } else {
+                    return flux
+                        .flatMap(group -> group
+                            .reduce(AggregationData::merge)
+                            .map(agg -> {
+                                Map<String, Object> values = new HashMap<>();
+                                //values.put("time", group.key());
+                                for (Map.Entry<String, String> props : propertyAlias.entrySet()) {
+                                    values.put(props.getKey(), agg
+                                        .get("value_" + props.getKey())
+                                        .orElse(0));
+                                }
+                                return values;
+                            }));
                 }
-            )
+            })
             .map(map -> {
                 map.remove("");
                 propertyAlias
@@ -269,8 +316,12 @@ public class TimeSeriesRowDeviceDataStoreStoragePolicy extends TimeSeriesDeviceD
                     .forEach(key -> map.putIfAbsent(key, 0));
                 return AggregationData.of(map);
             })
-            .sort(Comparator.<AggregationData, Date>comparing(agg -> CastUtils.castDate(agg.values().get("_time"))).reversed())
+            .sort(Comparator.<AggregationData, Date>comparing(agg -> CastUtils.castDate(agg
+                                                                                            .values()
+                                                                                            .get("_time")))
+                            .reversed())
             .doOnNext(agg -> agg.values().remove("_time"))
+            .take(request.getLimit())
             ;
     }
 
@@ -288,6 +339,16 @@ public class TimeSeriesRowDeviceDataStoreStoragePolicy extends TimeSeriesDeviceD
             .doOnNext(agg -> agg.values().remove("_time"));
     }
 
+    /**
+     * 设备消息转换 二元组{deviceId, tsData}
+     *
+     * @param productId  产品ID
+     * @param message    设备属性消息
+     * @param properties 物模型属性
+     * @return 数据集合
+     * @see this#convertPropertiesForColumnPolicy(String, DeviceMessage, Map)
+     * @see this#convertPropertiesForRowPolicy(String, DeviceMessage, Map)
+     */
     @Override
     protected Flux<Tuple2<String, TimeSeriesData>> convertProperties(String productId, DeviceMessage message, Map<String, Object> properties) {
         return convertPropertiesForRowPolicy(productId, message, properties);

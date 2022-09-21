@@ -20,10 +20,11 @@ hs_err_pid*
 **/transaction-logs/
 !/.mvn/wrapper/maven-wrapper.jar
 *.db
-./data/
+/data/
 /static/
 /upload
 /ui/upload/
 docker/data
 !device-simulator.jar
 !demo-protocol-1.0.jar
+application-local.yml
