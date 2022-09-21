@@ -5,7 +5,7 @@
     <parent>
         <artifactId>notify-component</artifactId>
         <groupId>org.jetlinks.community</groupId>
-        <version>1.12.0-SNAPSHOT</version>
+        <version>1.20.0-SNAPSHOT</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
@@ -41,7 +41,13 @@
         <dependency>
             <groupId>org.jsoup</groupId>
             <artifactId>jsoup</artifactId>
-            <version>1.11.3</version>
+            <version>1.15.3</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.jetlinks.community</groupId>
+            <artifactId>io-component</artifactId>
+            <version>${project.version}</version>
         </dependency>
 
     </dependencies>

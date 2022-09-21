@@ -5,8 +5,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.hswebframework.ezorm.rdb.mapping.ReactiveRepository;
+import org.hswebframework.ezorm.rdb.mapping.ReactiveUpdate;
 import org.hswebframework.ezorm.rdb.mapping.defaults.SaveResult;
 import org.hswebframework.ezorm.rdb.operator.dml.Terms;
+import org.hswebframework.web.crud.events.EntityDeletedEvent;
+import org.hswebframework.web.crud.events.EntityEventHelper;
 import org.hswebframework.web.crud.service.GenericReactiveCrudService;
 import org.hswebframework.web.exception.BusinessException;
 import org.hswebframework.web.id.IDGenerator;
@@ -32,7 +35,9 @@ import org.jetlinks.core.metadata.PropertyMetadata;
 import org.jetlinks.core.metadata.types.StringType;
 import org.jetlinks.core.utils.CyclicDependencyChecker;
 import org.reactivestreams.Publisher;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -314,14 +319,17 @@ public class LocalDeviceInstanceService extends GenericReactiveCrudService<Devic
                 .flatMap(id -> registry
                     .getDevice(id)
                     .flatMap(operator -> {
-                        Mono<Byte> state = force ? operator.checkState() : operator.getState();
-                        return Mono.zip(
-                            state.defaultIfEmpty(org.jetlinks.core.device.DeviceState.offline),//状态
-                            Mono.just(operator.getDeviceId()), //设备id
-                            operator
-                                .getConfig(DeviceConfigKey.isGatewayDevice)
-                                .defaultIfEmpty(false)//是否为网关设备
-                        );
+                        Mono<Byte> state = force
+                            ? operator
+                            .checkState()
+                            .onErrorResume(err -> operator.getState())
+                            : operator.getState();
+                        return Mono
+                            .zip(
+                                state.defaultIfEmpty(org.jetlinks.core.device.DeviceState.offline),//状态
+                                Mono.just(operator.getDeviceId()), //设备id
+                                operator.getConfig(DeviceConfigKey.isGatewayDevice).defaultIfEmpty(false)//是否为网关设备
+                            );
                     })
                     //注册中心里不存在设备就认为是未激活.
                     .defaultIfEmpty(Tuples.of(org.jetlinks.core.device.DeviceState.noActive, id, false)))
@@ -334,45 +342,25 @@ public class LocalDeviceInstanceService extends GenericReactiveCrudService<Devic
                         .map(Tuple3::getT2)
                         .collect(Collectors.toList());
                     DeviceState state = DeviceState.of(group.getKey());
-                    return Flux
-                        .concat(
-                            //批量修改设备状态
-                            getRepository()
-                                .createUpdate()
-                                .set(DeviceInstanceEntity::getState, state)
-                                .where()
-                                .in(DeviceInstanceEntity::getId, deviceIdList)
-                                .execute()
-                                .thenReturn(group.getValue().size()),
-                            //修改子设备状态
-                            Flux.fromIterable(group.getValue())
-                                .filter(Tuple3::getT3)
-                                .map(Tuple3::getT2)
-                                .collectList()
-                                .filter(CollectionUtils::isNotEmpty)
-                                .flatMap(parents -> this
-                                    .getRepository()
-                                    .createUpdate()
-                                    .set(DeviceInstanceEntity::getState, state)
-                                    .where()
-                                    .in(DeviceInstanceEntity::getParentId, parents)
-                                    //不修改未激活的状态
-                                    .not(DeviceInstanceEntity::getState, DeviceState.notActive)
-                                    .nest()
-                                    /* */.accept(DeviceInstanceEntity::getFeatures, Terms.Enums.notInAny, DeviceFeature.selfManageState)
-                                    /* */.or()
-                                    /* */.isNull(DeviceInstanceEntity::getFeatures)
-                                    .end()
-                                    .execute())
-                                .defaultIfEmpty(0)
-                        )
-                        .then(Mono.just(
-                            deviceIdList
-                                .stream()
-                                .map(id -> DeviceStateInfo.of(id, state))
-                                .collect(Collectors.toList())
-                        ));
-                }));
+                    return
+                        //批量修改设备状态
+                        getRepository()
+                            .createUpdate()
+                            .set(DeviceInstanceEntity::getState, state)
+                            .where()
+                            .in(DeviceInstanceEntity::getId, deviceIdList)
+                            .when(state != DeviceState.notActive, where -> where.not(DeviceInstanceEntity::getState, DeviceState.notActive))
+                            .execute()
+                            .thenReturn(group.getValue().size())
+                            .then(Mono.just(
+                                deviceIdList
+                                    .stream()
+                                    .map(id -> DeviceStateInfo.of(id, state))
+                                    .collect(Collectors.toList())
+                            ));
+                }))
+            //更新状态不触发事件
+            .as(EntityEventHelper::setDoNotFireEvent);
     }
 
     private static <R extends DeviceMessageReply, T> Function<R, Mono<T>> mapReply(Function<R, T> function) {
@@ -477,4 +465,64 @@ public class LocalDeviceInstanceService extends GenericReactiveCrudService<Devic
         return checker.check(instance);
     }
 
+    public Mono<Void> mergeConfiguration(String deviceId,
+                                         Map<String, Object> configuration,
+                                         Function<ReactiveUpdate<DeviceInstanceEntity>,
+                                             ReactiveUpdate<DeviceInstanceEntity>> updateOperation) {
+        if (MapUtils.isEmpty(configuration)) {
+            return Mono.empty();
+        }
+        return this
+            .findById(deviceId)
+            .flatMap(device -> {
+                //合并更新配置
+                device.mergeConfiguration(configuration);
+                return createUpdate()
+                    .set(device::getConfiguration)
+                    .set(device::getFeatures)
+                    .set(device::getDeriveMetadata)
+                    .as(updateOperation)
+                    .where(device::getId)
+                    .execute();
+            })
+            .then(
+                //更新缓存里到信息
+                registry
+                    .getDevice(deviceId)
+                    .flatMap(device -> device.setConfigs(configuration))
+            )
+            .then();
+
+    }
+
+    /**
+     * 删除设备后置处理,解绑子设备和网关,并在注册中心取消激活已激活设备.
+     */
+    private Flux<Void> deletedHandle(Flux<DeviceInstanceEntity> devices) {
+        return devices.filter(device -> !StringUtils.isEmpty(device.getParentId()))
+            .groupBy(DeviceInstanceEntity::getParentId)
+            .flatMap(group -> {
+                String parentId = group.key();
+                return group.flatMap(child -> registry.getDevice(child.getId())
+                            .flatMap(device -> device.removeConfig(DeviceConfigKey.parentGatewayId.getKey()).thenReturn(device))
+                    )
+                    .as(childrenDeviceOp -> registry.getDevice(parentId)
+                        .flatMap(gwOperator -> gwOperator.getProtocol()
+                            .flatMap(protocolSupport -> protocolSupport.onChildUnbind(gwOperator, childrenDeviceOp))
+                        )
+                    );
+            })
+            // 取消激活
+            .thenMany(
+                devices.filter(device -> device.getState() != DeviceState.notActive)
+                    .flatMap(device -> registry.unregisterDevice(device.getId()))
+            );
+    }
+
+    @EventListener
+    public void deletedHandle(EntityDeletedEvent<DeviceInstanceEntity> event) {
+        event.async(
+            this.deletedHandle(Flux.fromIterable(event.getEntity())).then()
+        );
+    }
 }
