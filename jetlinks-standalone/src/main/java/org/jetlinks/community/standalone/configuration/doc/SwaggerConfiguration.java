@@ -30,7 +30,7 @@ import java.util.List;
         title = "物联网平台",
         description = "物联网平台接口文档",
         contact = @Contact(name = "admin",url = "https://github.com/jetlinks"),
-        version = "1.12.0-SNAPSHOT"
+        version = "1.12.0"
     )
 )
 @SecuritySchemes(
@@ -46,51 +46,5 @@ import java.util.List;
 )
 @AutoConfigureBefore(SpringDocWebFluxConfiguration.class)
 public class SwaggerConfiguration {
-
-
-    @Bean
-    public ReturnTypeParser operationCustomizer() {
-
-        return new ReturnTypeParser() {
-            @Override
-            public Type getReturnType(MethodParameter methodParameter) {
-                Type type = ReturnTypeParser.super.getReturnType(methodParameter);
-
-                if (type instanceof ParameterizedType) {
-                    ParameterizedType parameterizedType = ((ParameterizedType) type);
-                    Type rawType = parameterizedType.getRawType();
-                    if (rawType instanceof Class && Publisher.class.isAssignableFrom(((Class<?>) rawType))) {
-                        Type actualType = parameterizedType.getActualTypeArguments()[0];
-
-                        if (actualType instanceof ParameterizedType) {
-                            actualType = ((ParameterizedType) actualType).getRawType();
-                        }
-                        if (actualType == ResponseEntity.class || actualType == ResponseMessage.class) {
-                            return type;
-                        }
-                        boolean returnList = Flux.class.isAssignableFrom(((Class<?>) rawType));
-
-                        //统一返回ResponseMessage
-                        return ResolvableType
-                            .forClassWithGenerics(
-                                Mono.class,
-                                ResolvableType.forClassWithGenerics(
-                                    ResponseMessage.class,
-                                    returnList ?
-                                        ResolvableType.forClassWithGenerics(
-                                            List.class,
-                                            ResolvableType.forType(parameterizedType.getActualTypeArguments()[0])
-                                        ) :
-                                        ResolvableType.forType(parameterizedType.getActualTypeArguments()[0])
-                                ))
-                            .getType();
-
-                    }
-                }
-
-                return type;
-            }
-        };
-    }
 
 }
